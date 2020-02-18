@@ -46,7 +46,7 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 warnings.simplefilter(action="ignore", category=DeprecationWarning)
 
 # ==================================================================================================
-# [+] RUN SETTINGS
+# [+] RUN SETTINGS & CONSTANTS
 # ==================================================================================================
 
 # cli argument parsing
@@ -81,7 +81,7 @@ warnings.simplefilter(action="ignore", category=DeprecationWarning)
 # DRY_RUN = args.dry_run  # runs flow on small subset of data for speed and disables mlfow tracking
 # LOGGING = args.log  # mlflow experiment logging
 
-LEVEL = "product"
+PREDICTION_LEVEL = "product"
 RUN_MODE = "experiment"  # one of ['production', 'experiment']
 TRAIN_MODEL = True  # if False, will load most recent model object instead of retraining
 EVALUATE_MODEL = True  # if False, will create predictions without further evaluation
@@ -109,24 +109,26 @@ for directory in [MODEL_DIR, LOG_DIR]:  # make local directories if they do not 
         os.makedirs(directory)
 
 # data related
-N_ITEMS = 6000
+N_WEEKS_OF_DATA = 2
+N_ITEMS = 12000
 MIN_ITEMS_TRAIN = 2  # sequences with less products (excluding target) are invalid and removed
 MIN_ITEMS_PRED = 0  # 0 + 1 (target) == require a single product view to predict on
 N_DAYS_TO_PREDICT = 1  # how many days to holdout to create predictions on in experiments
 FILTER_REPEATED_UNIQUES = True  # filters sequences with only 1 unique item e.g. [1, 1, 1, 1]
 WINDOW_LEN = 4  # fixed moving window size for generating input-sequence/target rows for training
-PRED_LOOKBACK = 12  # number of most recent products used per sequence in the test set to predict on
-N_ITEMS_TO_PRED = 8  # number of top N item probabilities to extract from the full item matrix
+PRED_LOOKBACK = 8  # number of most recent products used per sequence in the test set to predict on
+N_ITEMS_TO_PRED = 10  # number of top N item probabilities to extract from the full item matrix
 
 # model related
-EMBED_DIM = 32  # number of dimensions for the embeddings
+EMBED_DIM = 48  # number of dimensions for the embeddings
 N_HIDDEN_UNITS = 84  # number of units in the GRU layers
 MAX_EPOCHS = 48  # maximum number of epochs to train for
-BATCH_SIZE = 768  # batch size for training
+BATCH_SIZE = 512  # batch size for training
 DROPOUT = 0.0  # network node dropout (better to avoid in RNNs)
 RECURRENT_DROPOUT = 0.10  # recurrent state dropout (during training only)
-LEARNING_RATE = 0.006
+LEARNING_RATE = 0.005
 OPTIMIZER = tf.keras.optimizers.Adamax(learning_rate=LEARNING_RATE)
+REGULARIZER = None  # tf.keras.regularizers.l2(0.01)
 
 # FP16 mixed-precision training instead of FP32 for gradients and model weights (only on GPU)
 # See: https://docs.nvidia.com/deeplearning/sdk/mixed-precision-training/index.html#tensorflow-amp
@@ -786,7 +788,7 @@ sequence_df = pd.read_csv(
     "./neural-product-personalization/data/daily_sequences_20200211.csv", encoding="utf-8",
 )
 product_map_df = pd.read_csv(
-    "./neural-product-personalization/data/product_map_df_20200210.csv", encoding="utf-8"
+    "./neural-product-personalization/data/product_map_df.csv", encoding="utf-8"
 )
 
 # product_map_df = query_product_map_data()
@@ -795,7 +797,7 @@ product_map_df = pd.read_csv(
 # else:  # only complete session days
 #     sequence_df = query_product_sequence_data()
 
-# sequence_df.tail(int(6271528))
+sequence_df.tail(int(3135764 * N_WEEKS_OF_DATA))  # 3 weeks of data
 rows_in_raw_df = len(sequence_df)
 
 if DRY_RUN:
@@ -876,7 +878,7 @@ if TRAIN_MODEL:
     logger.info(
         "[v] Elapsed time for processing input data: {:.4} seconds".format(time.time() - t0_data)
     )
-    del sequences, sequences_train, sequences_val
+    # del sequences, sequences_train, sequences_val
     gc.collect()
 
 
@@ -924,7 +926,7 @@ if TRAIN_MODEL:
                     recurrent_activation="sigmoid",
                     dropout=DROPOUT,
                     recurrent_dropout=RECURRENT_DROPOUT,
-                    recurrent_regularizer=tf.keras.regularizers.l2(0.01),
+                    recurrent_regularizer=REGULARIZER,
                     return_sequences=False,
                     unroll=False,
                     use_bias=True,
@@ -945,7 +947,7 @@ if TRAIN_MODEL:
     logger.info("   Logging model configuration {}".format(model.get_config()))
 
     early_stopping_monitor = tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", min_delta=0, patience=1, verbose=1, restore_best_weights=True
+        monitor="val_loss", min_delta=0, patience=3, verbose=1, restore_best_weights=True
     )
     logger.info(
         "     Training for a maximum of {} Epochs with batch size {}".format(MAX_EPOCHS, BATCH_SIZE)
@@ -1065,6 +1067,7 @@ if EVALUATE_MODEL:
     map5 = mean_average_precision(y_test, y_pred[:, :5], k=5)
     map6 = mean_average_precision(y_test, y_pred[:, :6], k=6)
     map8 = mean_average_precision(y_test, y_pred[:, :8], k=8)
+    map10 = mean_average_precision(y_test, y_pred[:, :10], k=10)
     coverage = len(np.unique(y_pred[:, :6])) / len(np.unique(X_train))
     novelty = mean_novelty(X_test[:, -6:], y_pred[:, :6])
 
@@ -1073,6 +1076,7 @@ if EVALUATE_MODEL:
     map4_views = mean_average_precision(y_test, X_test[:, -4:], k=4)
     map6_views = mean_average_precision(y_test, X_test[:, -6:], k=6)
     map8_views = mean_average_precision(y_test, X_test[:, -8:], k=8)
+    map10_views = mean_average_precision(y_test, X_test[:, -10:], k=10)
     coverage_views = len(np.unique(X_test[:, -6:])) / len(np.unique(X_train))
     novelty_views = mean_novelty(X_test[:, -6:], X_test[:, -6:])
 
@@ -1082,6 +1086,7 @@ if EVALUATE_MODEL:
     map4_pop = mean_average_precision(y_test, pop_products[:, :4], k=4)
     map6_pop = mean_average_precision(y_test, pop_products[:, :6], k=6)
     map8_pop = mean_average_precision(y_test, pop_products[:, :8], k=8)
+    map10_pop = mean_average_precision(y_test, pop_products[:, :10], k=10)
     coverage_pop = len(np.unique(pop_products[:, :6])) / len(np.unique(X_train))
     novelty_pop = mean_novelty(X_test[:, -6:], pop_products[:, :6])
 
@@ -1092,6 +1097,7 @@ if EVALUATE_MODEL:
     logger.info("           MAP @ 5        {:.3}".format(map5))
     logger.info("           MAP @ 6        {:.3}".format(map6))
     logger.info("           MAP @ 8        {:.3}".format(map8))
+    logger.info("           MAP @ 10        {:.3}".format(map10))
     logger.info("           Coverage       {:.4}%".format(coverage * 100))
     logger.info("           Novelty        {:.4}%".format(novelty * 100))
 
@@ -1102,6 +1108,7 @@ if EVALUATE_MODEL:
     logger.info("           MAP @ 4        {:.3}".format(map4_views))
     logger.info("           MAP @ 6        {:.3}".format(map6_views))
     logger.info("           MAP @ 8        {:.3}".format(map8_views))
+    logger.info("           MAP @ 10        {:.3}".format(map10_views))
     logger.info("           Coverage       {:.4}%".format(coverage_views * 100))
     logger.info("           Novelty        {:.4}%".format(novelty_views * 100))
 
@@ -1111,6 +1118,7 @@ if EVALUATE_MODEL:
     logger.info("           MAP @ 4        {:.3}".format(map4_pop))
     logger.info("           MAP @ 6        {:.3}".format(map6_pop))
     logger.info("           MAP @ 8        {:.3}".format(map8_pop))
+    logger.info("           MAP @ 10        {:.3}".format(map10_pop))
     logger.info("           Coverage       {:.4}%".format(coverage_pop * 100))
     logger.info("           Novelty        {:.4}%".format(novelty_pop * 100))
 
@@ -1123,7 +1131,7 @@ if LOGGING and not DRY_RUN:
     logger.info("🧪 Logging experiment to mlflow")
 
     # Set tags
-    mlflow.set_tags({"tf": tf.__version__, "level": LEVEL})
+    mlflow.set_tags({"tf": tf.__version__, "level": PREDICTION_LEVEL})
 
     # Log parameters
     mlflow.log_param("mode", RUN_MODE)
@@ -1142,6 +1150,7 @@ if LOGGING and not DRY_RUN:
     mlflow.log_param("recurrent_dropout", RECURRENT_DROPOUT)
     mlflow.log_param("trainable_params", total_params)
     mlflow.log_param("optimizer", OPTIMIZER)
+    mlflow.log_param("regularizer", REGULARIZER)
     mlflow.log_param("window", WINDOW_LEN)
     mlflow.log_param("pred_lookback", PRED_LOOKBACK)
     mlflow.log_param("min_items_train", MIN_ITEMS_TRAIN)
@@ -1155,6 +1164,8 @@ if LOGGING and not DRY_RUN:
     mlflow.log_param("min_pred_date", min_pred_date)
     mlflow.log_param("max_pred_date", max_pred_date)
     mlflow.log_param("rows_in_raw_df", rows_in_raw_df)
+    mlflow.log_param("n_weeks", N_WEEKS_OF_DATA)
+
 
     # Log metrics
     if EVALUATE_MODEL:
@@ -1164,6 +1175,7 @@ if LOGGING and not DRY_RUN:
         mlflow.log_metric("MAP 5", np.round(map5, 3))
         mlflow.log_metric("MAP 6", np.round(map6, 3))
         mlflow.log_metric("MAP 8", np.round(map8, 3))
+        mlflow.log_metric("MAP 10", np.round(map10, 3))
         mlflow.log_metric("coverage", np.round(coverage, 3))
         mlflow.log_metric("novelty", np.round(novelty, 3))
 
@@ -1197,90 +1209,23 @@ logger.handlers = []  # kill loggers
 # [+] MODEL VALIDATION
 # ==================================================================================================
 
-# import itertools
-# import collections
-# import matplotlib.pyplot as plt
-# import seaborn as sns
-#
-#
-# def create_input_output_count_df(X_test, y_pred, tokenizer, product_map_df):
-#     combinations = [
-#         list(itertools.product(X_test[row][np.nonzero(X_test[row])], y_pred[row]))
-#         for row in np.arange(len(X_test))
-#     ]
-#     combinations = filter(None, combinations)  # filter out empty lists
-#     combinations = np.vstack(combinations)
-#     combinations_counter_dict = dict(collections.Counter(map(tuple, combinations)))
-#     sorted_combinations_counter_dict = {
-#         k: v
-#         for k, v in sorted(
-#             combinations_counter_dict.items(), key=lambda item: item[1], reverse=True
-#         )
-#     }
-#
-#     tuple_df = pd.DataFrame(
-#         (tokenizer.index_word[token], tokenizer.index_word[product_type_id])
-#         for token, product_type_id in sorted_combinations_counter_dict.keys()
-#     )
-#     tuple_df["count"] = sorted_combinations_counter_dict.values()
-#     tuple_df.columns = ["input_id", "output_id", "count"]
-#
-#     id_to_name_map_dict = dict(
-#         zip(
-#             product_map_df["product_id"].astype(str),
-#             product_map_df["product_type_name"].astype(str),
-#         )
-#     )
-#
-#     tuple_df["input_type_name"] = tuple_df["input_id"].map(id_to_name_map_dict)
-#     tuple_df["output_type_name"] = tuple_df["output_id"].map(id_to_name_map_dict)
-#     return tuple_df
-#
-#
-# def plot_product_relations(tuple_df, input_type_name="random"):
-#     if input_type_name == "random":
-#         input_type_name = tuple_df["input_type_name"].sample(n=1).values[0]
-#
-#     input_type_id = tuple_df[tuple_df["input_type_name"] == input_type_name]["input_id"].iloc[0]
-#     input_type_count = tuple_df[tuple_df["input_type_name"] == input_type_name]["count"].sum()
-#
-#     fig, ax = plt.subplots(figsize=(10, 6))
-#     sns.barplot(
-#         x="count",
-#         y="output_type_name",
-#         hue="output_type_name",
-#         data=tuple_df[tuple_df["input_type_name"] == input_type_name].iloc[0:8],
-#         palette="magma",
-#         ax=ax,
-#         dodge=False,
-#     )
-#     plt.title(
-#         "Strongest I/O Relations \n Input Item: {} \n Input Product Type ID: {} \n Input Occurence: {}".format(
-#             input_type_name.capitalize(), input_type_id, input_type_count
-#         ),
-#         size=13,
-#         weight="bold",
-#     )
-#     plt.ylabel("OCCURENCE")
-#     plt.xlabel("OUTPUT ITEM")
-#     plt.legend("")
-#     plt.tight_layout()
-#
-#
-# tuple_df = create_input_output_count_df(X_test, y_pred, tokenizer, product_map_df)
-# plot_product_relations(tuple_df)
-#
-#
-# tuple_df
+# PRODUCT CASES
 
-#############
+input_products = tokenizer.sequences_to_texts(X_test)
+input_products = [
+    ",".join(sequence.split(" ")) for sequence in input_products
+]
+input_products = [
+    sequence.split(",") for sequence in input_products
+]
 
-product_type_map_df = product_map_df[["product_id", "product_name"]].drop_duplicates()
-predictions = pd.read_csv("./data/sequence_pred_df.csv")
-
-# split sequences and put in list for mapping
-input_list = [sequence.split(",") for sequence in predictions["input_product_sequence"]]
-output_list = [sequence.split(",") for sequence in predictions["predicted_products"]]
+predicted_products = tokenizer.sequences_to_texts(y_pred)
+predicted_products = [
+    ",".join(sequence.split(" ")) for sequence in predicted_products
+]
+predicted_products = [
+    sequence.split(",") for sequence in predicted_products
+]
 
 # create mapping dictionaries
 product_map = dict(
@@ -1288,18 +1233,92 @@ product_map = dict(
 )
 
 
-cases = 80000
-input_names = [[product_map[i] for i in input_list[j]] for j in np.arange(0, cases)]
-output_names = [[[product_map[i] for i in output_list[j]]] for j in np.arange(0, cases)]
+input_names = []
+for j in np.arange(0, len(input_products)):
+    input_names.append([product_map[i] for i in input_products[j]])
+output_names = []
+for j in np.arange(0, len(predicted_products)):
+    output_names.append([product_map[i] for i in predicted_products[j]])
 
-input_pt_names = []
-for j in np.arange(0, 80000):
-    input_names.append([product_map[i] for i in input_list[j]])
+case_names = list(zip(input_names, output_names))
+case_names[np.random.randint(0, len(case_names))]
 
-output_pt_names = []
-for j in np.arange(0, 80000):
-    output_names.append([product_map[i] for i in output_list[j]])
 
-case_pt_names = list(zip(input_names, output_names))
+##########################################################################################
+# PRODUCT CASES SUMMARY
 
-case_pt_names[np.random.randint(0, 80000)]
+import itertools
+import collections
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+
+
+def create_input_output_count_df(X_test, y_pred, tokenizer, product_map_df):
+    combinations = [
+        list(itertools.product(X_test[row][np.nonzero(X_test[row])], y_pred[row]))
+        for row in np.arange(len(X_test))
+    ]
+    combinations = filter(None, combinations)  # filter out empty lists
+    combinations = np.vstack(combinations)
+    combinations_counter_dict = dict(collections.Counter(map(tuple, combinations)))
+    sorted_combinations_counter_dict = {
+        k: v
+        for k, v in sorted(
+            combinations_counter_dict.items(), key=lambda item: item[1], reverse=True
+        )
+    }
+
+    tuple_df = pd.DataFrame(
+        (tokenizer.index_word[token], tokenizer.index_word[product_id])
+        for token, product_id in sorted_combinations_counter_dict.keys()
+    )
+    tuple_df["count"] = sorted_combinations_counter_dict.values()
+    tuple_df.columns = ["input_id", "output_id", "count"]
+
+    id_to_name_map_dict = dict(
+        zip(
+            product_map_df["product_id"].astype(str),
+            product_map_df["product_name"].astype(str),
+        )
+    )
+
+    tuple_df["input_name"] = tuple_df["input_id"].map(id_to_name_map_dict)
+    tuple_df["output_name"] = tuple_df["output_id"].map(id_to_name_map_dict)
+    return tuple_df
+
+
+def plot_product_relations(tuple_df, input_name="random"):
+    if input_name == "random":
+        input_name = tuple_df["input_name"].sample(n=1).values[0]
+
+    input_id = tuple_df[tuple_df["input_name"] == input_name]["input_id"].iloc[0]
+    input_count = tuple_df[tuple_df["input_name"] == input_name]["count"].sum()
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    sns.barplot(
+        x="count",
+        y="output_name",
+        hue="output_name",
+        data=tuple_df[tuple_df["input_name"] == input_name].iloc[0:10],
+        palette="viridis",
+        ax=ax,
+        dodge=False,
+    )
+    plt.title(
+        "Strongest I/O Relations \n Input Item: {} \n Input Product ID: {} \n Input Occurence: {}".format(
+            input_name.capitalize(), input_id, input_count
+        ),
+        size=13,
+        weight="bold",
+    )
+    plt.ylabel("OCCURENCE")
+    plt.xlabel("OUTPUT ITEM")
+    plt.legend("")
+    plt.tight_layout()
+
+
+tuple_df = create_input_output_count_df(X_test, y_pred, tokenizer, product_map_df)
+tuple_df.iloc[50000:50020]
+
+plot_product_relations(tuple_df)
